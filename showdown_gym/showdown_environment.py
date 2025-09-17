@@ -103,6 +103,8 @@ class ShowdownEnvironment(BaseShowdownEnv):
             int: The size of the observation space.
         """
 
+        
+
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
         return 12
