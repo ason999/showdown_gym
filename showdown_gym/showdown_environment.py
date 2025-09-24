@@ -14,7 +14,7 @@ from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
-
+  
 TYPE_CHART = {
     "normal":   {"rock": 0.5, "ghost": 0.0, "steel": 0.5},
     "fire":     {"fire": 0.5, "water": 0.5, "grass": 2.0, "ice": 2.0, "bug": 2.0,
