@@ -14,7 +14,7 @@ from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.player.player import Player
 
 from showdown_gym.base_environment import BaseShowdownEnv
-  
+     
 TYPE_CHART = {
     "normal":   {"rock": 0.5, "ghost": 0.0, "steel": 0.5},
     "fire":     {"fire": 0.5, "water": 0.5, "grass": 2.0, "ice": 2.0, "bug": 2.0,
@@ -49,6 +49,7 @@ TYPE_CHART = {
     "fairy":    {"fire": 0.5, "fighting": 2.0, "poison": 0.5, "dragon": 2.0,
                  "dark": 2.0, "steel": 0.5},
 }
+
 
 def type_effectiveness(move_type, target_type1, target_type2) -> float:
     """Return effectiveness multiplier (0, 0.5, 1, 2, 4) for move_type vs target."""
