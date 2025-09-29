@@ -129,7 +129,16 @@ def type_effectiveness(move_type, target_type1, target_type2) -> float:
 
     return eff
 
+def _type_name(x):
+    if x is None: return None
+    n = getattr(x, "name", None)
+    if n: return n.lower()
+    s = str(x).lower()
+
+    return s.split(".")[-1] if "." in s else s
+
 class ShowdownEnvironment(BaseShowdownEnv):
+
 
     def __init__(
         self,
@@ -200,20 +209,51 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Reward for reducing the opponent's health
         reward += np.sum(diff_health_opponent) / 6.0        # max ~+1 if you KO 1 mon
-        reward -= 0.5 * np.sum(diff_health_team) / 6.0      # penalty scaled down
+        reward -=  np.sum(diff_health_team) / 6.0      # penalty scaled down
        
         #crit bonus
-        last_move = getattr(battle, "last_move", None)
-        if last_move is not None and getattr(last_move, "is_critical_hit", False):
-                reward += 0.2
+        # last_move = getattr(battle, "last_move", None)
+        # if last_move is not None and getattr(last_move, "is_critical_hit", False):
+        #         reward += 0.2
 
-        prior_fainted_opponent = sum(mon.fainted for mon in prior_battle.opponent_team.values()) if prior_battle else 0
-        current_fainted_opponent = sum(mon.fainted for mon in battle.opponent_team.values())
-        reward += (current_fainted_opponent - prior_fainted_opponent)  # +1 per new KO
+        # Encourage using effective moves and discourage bad/immune hits
+        if battle.active_pokemon and battle.opponent_active_pokemon:
+            opp_t1 = battle.opponent_active_pokemon.type_1
+            opp_t2 = battle.opponent_active_pokemon.type_2
 
-        prior_fainted_team = sum(mon.fainted for mon in prior_battle.team.values()) if prior_battle else 0
-        current_fainted_team = sum(mon.fainted for mon in battle.team.values())
-        reward -= 0.5 * (current_fainted_team - prior_fainted_team)    # -0.5 per your KO
+            eff_values = []
+            for mv in getattr(battle.active_pokemon, "moves", {}).values():
+                if getattr(mv, "type", None) is not None:
+                    eff_values.append(type_effectiveness(mv.type, opp_t1, opp_t2))
+
+            if eff_values:
+                max_eff = max(eff_values)
+                # Piecewise shaping: push toward favourable matchups, avoid immunities
+                if max_eff == 0.0:
+                    reward -= 0.4          # nothing hits → bad matchup
+                elif max_eff < 1.0:
+                    reward -= 0.1          # at best resisted
+                elif max_eff > 1.0:
+                    reward += 0.15         # a super-effective option exists
+                # else: best is neutral → no bonus/penalty
+
+        # prior_fainted_opponent = sum(mon.fainted for mon in prior_battle.opponent_team.values()) if prior_battle else 0
+        # current_fainted_opponent = sum(mon.fainted for mon in battle.opponent_team.values())
+        # reward += 0.5 * (current_fainted_opponent - prior_fainted_opponent)  # +1 per new KO
+
+        # prior_fainted_team = sum(mon.fainted for mon in prior_battle.team.values()) if prior_battle else 0
+        # current_fainted_team = sum(mon.fainted for mon in battle.team.values())
+        # reward -=  0.5 * (current_fainted_team - prior_fainted_team)    # -0.5 per your KO
+
+        progress = (np.sum(diff_health_opponent) - np.sum(diff_health_team)) / 6.0
+        if abs(progress) < 1e-3:  # basically no HP change
+            reward -= 0.01
+
+        if battle.finished:   # or however poke-env exposes terminal
+            if battle.won:
+                reward += 3.0
+            else:
+                reward -= 3.0
 
         return float(reward)
     
@@ -230,7 +270,7 @@ class ShowdownEnvironment(BaseShowdownEnv):
 
         # Simply change this number to the number of features you want to include in the observation from embed_battle.
         # If you find a way to automate this, please let me know!
-        return 20
+        return 26
 
     def embed_battle(self, battle: AbstractBattle) -> np.ndarray:
         """
@@ -256,29 +296,51 @@ class ShowdownEnvironment(BaseShowdownEnv):
         if len(health_opponent) < len(health_team):
             health_opponent.extend([1.0] * (len(health_team) - len(health_opponent)))
 
+        def is_stab(move, mon) -> float:
+            if not move or not mon:
+                return 0.0
+            mtyp = str(getattr(move.type, "name", move.type)).lower() if move.type else ""
+            t1 = str(getattr(mon.type_1, "name", mon.type_1)).lower() if mon.type_1 else ""
+            t2 = str(getattr(mon.type_2, "name", mon.type_2)).lower() if mon.type_2 else ""
+            return 1.0 if mtyp and (mtyp == t1 or mtyp == t2) else 0.0
 
         # Move features
         move_features = []
+        eff_values = []  # keep raw effectiveness for global context
         if battle.active_pokemon:
             for move in battle.active_pokemon.moves.values():
-                # effectiveness multiplier vs. current opponent
+                # Effectiveness vs current opponent
                 eff = 1.0
                 if battle.opponent_active_pokemon is not None:
                     eff = type_effectiveness(
                         move.type,
                         battle.opponent_active_pokemon.type_1,
-                        battle.opponent_active_pokemon.type_2
+                        battle.opponent_active_pokemon.type_2,
                     )
-                eff /= 4.0  # normalize so max = 1
+                eff_values.append(eff)
+                eff_norm = eff / 4.0  # in [0,1]
 
-                move_features.extend([
-                            eff,
-                            1.0 if move.category == "status" else 0.0
-                        ])
+                # STAB flag
+                stab = is_stab(move, battle.active_pokemon)
 
-            # pad to 4 moves × 4 features
-            while len(move_features) < 8:
+                # Base power normalized (status -> 0)
+                bp = getattr(move, "base_power", 0) or 0
+                # cap at 120 so things like 200 BP moves don’t dominate
+                bp_norm = min(float(bp), 120.0) / 120.0
+
+                move_features.extend([eff_norm, stab, bp_norm])
+
+            # Pad to 4 moves × 3 features
+            while len(move_features) < 4 * 3:
                 move_features.append(0.0)
+
+        # Global context: max effectiveness (normalized) and “any immunity” bit
+        if eff_values:
+            max_eff_norm = (max(eff_values) / 4.0)
+            any_immunity = 1.0 if any(e == 0.0 for e in eff_values) else 0.0
+        else:
+            max_eff_norm = 0.0
+            any_immunity = 0.0
 
 
         #########################################################################################################
@@ -288,9 +350,10 @@ class ShowdownEnvironment(BaseShowdownEnv):
         # Final vector - single array with health of both teams
         final_vector = np.concatenate(
             [
-                health_team,  # N components for the health of each pokemon
-                health_opponent,  # N components for the health of opponent pokemon
-                np.array(move_features) # Information on the moves 
+                np.array(health_team, dtype=np.float32),         # 6
+                np.array(health_opponent, dtype=np.float32),     # 6
+                np.array(move_features, dtype=np.float32),       # 12
+                np.array([max_eff_norm, any_immunity], dtype=np.float32),  # 2
             ]
         )
 
